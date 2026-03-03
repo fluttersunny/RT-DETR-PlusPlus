@@ -1,0 +1,46 @@
+task: detection
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox', ]
+
+num_classes: 1
+remap_mscoco_category: False
+
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: CrowdHumanDetection
+    img_folder: /root/share/data/CrowdHuman/images/train/
+    ann_file: /root/share/data/CrowdHuman/annotation_train.odgt
+    return_masks: False
+    # Remove ignore regions during training to avoid confusion.
+    remove_ignore: True
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  num_workers: 4
+  drop_last: True 
+  collate_fn:
+    type: BatchImageCollateFunction
+
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: CrowdHumanDetection
+    img_folder: /root/share/data/CrowdHuman/images/val/
+    ann_file: /root/share/data/CrowdHuman/annotation_val.odgt
+    return_masks: False
+    # Keep ignore regions during validation for correct evaluation.
+    remove_ignore: False
+    transforms:
+      type: Compose
+      ops: ~ 
+  shuffle: False
+  num_workers: 4
+  drop_last: False
+  collate_fn:
+    type: BatchImageCollateFunction

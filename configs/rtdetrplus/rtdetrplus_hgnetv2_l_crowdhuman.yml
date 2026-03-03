@@ -1,0 +1,14 @@
+__include__: [
+  '../base/rtdetrplus.yml',
+  '../dataset/crowdhuman_detection.yml',
+]
+
+output_dir: ./outputs/rtdetrplus_hgnetv2_l_crowdhuman
+
+RTDETRPlus:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B4'
+  return_idx: [1, 2, 3]
+  freeze_stem_only: True

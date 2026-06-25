@@ -18,8 +18,8 @@ HybridEncoder:
 
 DFINETransformer:
   use_moe_ffn: True
-  moe_num_experts: 4
-  moe_use_gating_residuals: True
+  moe_num_experts: 2
+  moe_use_gating_residuals: False
 
 RTDETRPlusCriterion:
   weight_dict:

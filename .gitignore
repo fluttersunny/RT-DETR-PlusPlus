@@ -1,1 +1,13 @@
+# Python cache
+**/__pycache__/
+
+# Generated training artifacts
+outputs/
+tests/
+
+# Local weights and archives
 pretrain/
+*.zip
+
+# Local experiment configs
+configs/rtdetrplus/*_nodino.yml

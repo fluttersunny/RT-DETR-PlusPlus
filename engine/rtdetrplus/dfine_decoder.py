@@ -274,14 +274,45 @@ class MoE_FFN(nn.Module):
             self.router = nn.Linear(embed_dim, num_experts, bias=False).float()
         if self.moe_use_gating_residuals:
             self.gate_map = nn.Linear(num_experts, num_experts, bias=False)
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(embed_dim, hidden_dim),
-                get_activation(activation),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_dim, embed_dim),
-            ) for _ in range(num_experts)
-        ])
+        self.activation = get_activation(activation)
+        self.dropout = nn.Dropout(dropout)
+        self.expert_w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, embed_dim))
+        self.expert_b1 = nn.Parameter(torch.empty(num_experts, hidden_dim))
+        self.expert_w2 = nn.Parameter(torch.empty(num_experts, embed_dim, hidden_dim))
+        self.expert_b2 = nn.Parameter(torch.empty(num_experts, embed_dim))
+        self._reset_expert_parameters()
+
+    def _reset_expert_parameters(self):
+        for idx in range(self.num_experts):
+            init.kaiming_uniform_(self.expert_w1[idx], a=math.sqrt(5))
+            fan_in1, _ = init._calculate_fan_in_and_fan_out(self.expert_w1[idx])
+            bound1 = 1 / math.sqrt(fan_in1) if fan_in1 > 0 else 0
+            init.uniform_(self.expert_b1[idx], -bound1, bound1)
+
+            init.kaiming_uniform_(self.expert_w2[idx], a=math.sqrt(5))
+            fan_in2, _ = init._calculate_fan_in_and_fan_out(self.expert_w2[idx])
+            bound2 = 1 / math.sqrt(fan_in2) if fan_in2 > 0 else 0
+            init.uniform_(self.expert_b2[idx], -bound2, bound2)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        legacy_w1 = prefix + 'experts.0.0.weight'
+        if legacy_w1 in state_dict and prefix + 'expert_w1' not in state_dict:
+            state_dict[prefix + 'expert_w1'] = torch.stack([
+                state_dict.pop(prefix + f'experts.{idx}.0.weight') for idx in range(self.num_experts)
+            ])
+            state_dict[prefix + 'expert_b1'] = torch.stack([
+                state_dict.pop(prefix + f'experts.{idx}.0.bias') for idx in range(self.num_experts)
+            ])
+            state_dict[prefix + 'expert_w2'] = torch.stack([
+                state_dict.pop(prefix + f'experts.{idx}.3.weight') for idx in range(self.num_experts)
+            ])
+            state_dict[prefix + 'expert_b2'] = torch.stack([
+                state_dict.pop(prefix + f'experts.{idx}.3.bias') for idx in range(self.num_experts)
+            ])
+
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x: torch.Tensor, gate_residual: torch.Tensor=None):
         # x: [B, N, C]
@@ -303,7 +334,13 @@ class MoE_FFN(nn.Module):
             gate_logits += gate_residual
 
         weights = F.softmax(gate_logits, dim=-1)
-        expert_outs = torch.stack([expert(reshaped_x) for expert in self.experts], dim=1)
+        expert_inputs = reshaped_x.unsqueeze(0).expand(self.num_experts, -1, -1)
+        expert_hidden = torch.bmm(expert_inputs, self.expert_w1.transpose(1, 2))
+        expert_hidden = expert_hidden + self.expert_b1.unsqueeze(1)
+        expert_hidden = self.dropout(self.activation(expert_hidden))
+        expert_outs = torch.bmm(expert_hidden, self.expert_w2.transpose(1, 2))
+        expert_outs = expert_outs + self.expert_b2.unsqueeze(1)
+        expert_outs = expert_outs.transpose(0, 1)
         out = (expert_outs * weights.unsqueeze(-1)).sum(dim=1).reshape(x.shape)
         return out, gate_logits
 

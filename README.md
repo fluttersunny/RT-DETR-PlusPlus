@@ -16,10 +16,10 @@ This work extends RT-DETR with stronger real-time performance, end-to-end deploy
 
 | Model | AP | AP50 | AP75 | FPS (T4) | Config |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| RT-DETR++-S | 49.8 | 66.9 | 54.1 | 253 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_s_coco.yml) |
-| RT-DETR++-M | 53.6 | 71.1 | 58.2 | 161 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_m_coco.yml) |
-| RT-DETR++-L | 55.5 | 73.1 | 60.4 | 119 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_l_coco.yml) |
-| RT-DETR++-X | 57.1 | 74.6 | 62.2 | 76 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_x_coco.yml) |
+| RT-DETR++S | 49.8 | 66.9 | 54.1 | 253 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_s_coco.yml) |
+| RT-DETR++M | 53.6 | 71.1 | 58.2 | 161 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_m_coco.yml) |
+| RT-DETR++L | 55.5 | 73.1 | 60.4 | 119 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_l_coco.yml) |
+| RT-DETR++X | 57.1 | 74.6 | 62.2 | 76 | [yml](./configs/rtdetrplus/rtdetrplus_hgnetv2_x_coco.yml) |
 
 ## Content
 
@@ -237,4 +237,3 @@ python tools/dataset/resize_obj365.py
 ```
 
 </details>
-

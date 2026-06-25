@@ -14,9 +14,13 @@ teacher_model:
   std: [0.229, 0.224, 0.225]
 
 HybridEncoder:
+  hidden_dim: 384
+  dim_feedforward: 2048
   distill_teacher_dim: 768
 
 DFINETransformer:
+  feat_channels: [384, 384, 384]
+  reg_scale: 8
   use_moe_ffn: True
   moe_num_experts: 2
   moe_use_gating_residuals: True

@@ -14,9 +14,13 @@ teacher_model:
   std: [0.229, 0.224, 0.225]
 
 HybridEncoder:
+  in_channels: [256, 512, 1024]
+  expansion: 0.5
+  depth_mult: 0.34
   distill_teacher_dim: 768
 
 DFINETransformer:
+  num_layers: 3
   use_moe_ffn: True
   moe_num_experts: 2
   moe_use_gating_residuals: True

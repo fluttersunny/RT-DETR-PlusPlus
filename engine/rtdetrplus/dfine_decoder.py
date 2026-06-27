@@ -160,11 +160,16 @@ class TransformerDecoderLayer(nn.Module):
                  use_moe_ffn=False,
                  moe_num_experts=4,
                  moe_2layer_gate=False,
-                 moe_use_gating_residuals=False):
+                 moe_use_gating_residuals=False,
+                 moe_top_k=None,
+                 use_deeper_ffn=False,
+                 deeper_ffn_hidden_dims=None):
         super(TransformerDecoderLayer, self).__init__()
         if layer_scale is not None:
             dim_feedforward = round(layer_scale * dim_feedforward)
             d_model = round(layer_scale * d_model)
+            if deeper_ffn_hidden_dims is not None:
+                deeper_ffn_hidden_dims = [round(layer_scale * dim) for dim in deeper_ffn_hidden_dims]
 
         # self attention
         self.self_attn = nn.MultiheadAttention(d_model, n_head, dropout=dropout, batch_first=True)
@@ -181,8 +186,15 @@ class TransformerDecoderLayer(nn.Module):
 
         # ffn
         self.use_moe_ffn = use_moe_ffn
+        self.use_deeper_ffn = use_deeper_ffn
         self.activation = get_activation(activation)
         self.dropout3 = nn.Dropout(dropout)
+        self.moe_ffn = None
+        self.linear1 = None
+        self.linear2 = None
+        self.linear3 = None
+        if self.use_moe_ffn and self.use_deeper_ffn:
+            raise ValueError('use_moe_ffn and use_deeper_ffn are mutually exclusive')
         if self.use_moe_ffn:
             self.moe_ffn = MoE_FFN(
                 embed_dim=d_model,
@@ -192,9 +204,16 @@ class TransformerDecoderLayer(nn.Module):
                 activation=activation,
                 moe_2layer_gate=moe_2layer_gate,
                 moe_use_gating_residuals=moe_use_gating_residuals,
+                moe_top_k=moe_top_k,
             )
-            self.linear1 = None
-            self.linear2 = None
+        elif self.use_deeper_ffn:
+            deeper_ffn_hidden_dims = deeper_ffn_hidden_dims or [800, 800]
+            if len(deeper_ffn_hidden_dims) != 2:
+                raise ValueError('deeper_ffn_hidden_dims must contain exactly two hidden dimensions')
+            hidden_dim1, hidden_dim2 = deeper_ffn_hidden_dims
+            self.linear1 = nn.Linear(d_model, hidden_dim1)
+            self.linear2 = nn.Linear(hidden_dim1, hidden_dim2)
+            self.linear3 = nn.Linear(hidden_dim2, d_model)
         else:
             self.linear1 = nn.Linear(d_model, dim_feedforward)
             self.linear2 = nn.Linear(dim_feedforward, d_model)
@@ -208,6 +227,8 @@ class TransformerDecoderLayer(nn.Module):
             init.xavier_uniform_(self.linear1.weight)
         if self.linear2 is not None:
             init.xavier_uniform_(self.linear2.weight)
+        if self.linear3 is not None:
+            init.xavier_uniform_(self.linear3.weight)
 
     def with_pos_embed(self, tensor, pos):
         return tensor if pos is None else tensor + pos
@@ -216,6 +237,13 @@ class TransformerDecoderLayer(nn.Module):
         if self.use_moe_ffn:
             target2, gate_residual = self.moe_ffn(tgt, gate_residual=gate_residual)
             return target2, gate_residual
+        if self.use_deeper_ffn:
+            target2 = self.linear1(tgt)
+            target2 = self.dropout3(self.activation(target2))
+            target2 = self.linear2(target2)
+            target2 = self.dropout3(self.activation(target2))
+            target2 = self.linear3(target2)
+            return target2, None
         return self.linear2(self.dropout3(self.activation(self.linear1(tgt)))), None
 
     def forward(self,
@@ -259,11 +287,17 @@ class MoE_FFN(nn.Module):
                  dropout=0.,
                  activation='silu',
                  moe_2layer_gate=False,
-                 moe_use_gating_residuals=False):
+                 moe_use_gating_residuals=False,
+                 moe_top_k=None):
         super().__init__()
         assert num_experts > 0, 'num_experts must be positive'
         self.num_experts = num_experts
         self.moe_use_gating_residuals = moe_use_gating_residuals
+        self.moe_top_k = moe_top_k
+        if self.moe_top_k is not None:
+            self.moe_top_k = int(self.moe_top_k)
+            if self.moe_top_k < 0:
+                raise ValueError('moe_top_k must be non-negative or None')
         if moe_2layer_gate:
             self.router = nn.Sequential(
                 nn.Linear(embed_dim, num_experts * 8, bias=False).float(),
@@ -334,13 +368,34 @@ class MoE_FFN(nn.Module):
             gate_logits += gate_residual
 
         weights = F.softmax(gate_logits, dim=-1)
-        expert_inputs = reshaped_x.unsqueeze(0).expand(self.num_experts, -1, -1)
-        expert_hidden = torch.bmm(expert_inputs, self.expert_w1.transpose(1, 2))
-        expert_hidden = expert_hidden + self.expert_b1.unsqueeze(1)
-        expert_hidden = self.dropout(self.activation(expert_hidden))
-        expert_outs = torch.bmm(expert_hidden, self.expert_w2.transpose(1, 2))
-        expert_outs = expert_outs + self.expert_b2.unsqueeze(1)
-        expert_outs = expert_outs.transpose(0, 1)
+        if self.moe_top_k is not None and 0 < self.moe_top_k < self.num_experts:
+            top_logits, top_indices = torch.topk(gate_logits, self.moe_top_k, dim=-1)
+            weights = F.softmax(top_logits, dim=-1)
+            out = reshaped_x.new_zeros(reshaped_x.shape)
+            for slot_idx in range(self.moe_top_k):
+                slot_indices = top_indices[:, slot_idx]
+                slot_weights = weights[:, slot_idx]
+                for expert_idx in range(self.num_experts):
+                    token_indices = torch.nonzero(slot_indices == expert_idx, as_tuple=False).flatten()
+                    if token_indices.numel() == 0:
+                        continue
+                    expert_inputs = reshaped_x.index_select(0, token_indices)
+                    expert_hidden = F.linear(expert_inputs, self.expert_w1[expert_idx], self.expert_b1[expert_idx])
+                    expert_hidden = self.dropout(self.activation(expert_hidden))
+                    expert_outs = F.linear(expert_hidden, self.expert_w2[expert_idx], self.expert_b2[expert_idx])
+                    weighted_outs = expert_outs * slot_weights.index_select(0, token_indices).to(expert_outs.dtype).unsqueeze(-1)
+                    weighted_outs = weighted_outs.to(out.dtype)
+                    out.index_add_(0, token_indices, weighted_outs)
+            out = out.reshape(x.shape)
+            return out, gate_logits
+        else:
+            expert_inputs = reshaped_x.unsqueeze(0).expand(self.num_experts, -1, -1)
+            expert_hidden = torch.bmm(expert_inputs, self.expert_w1.transpose(1, 2))
+            expert_hidden = expert_hidden + self.expert_b1.unsqueeze(1)
+            expert_hidden = self.dropout(self.activation(expert_hidden))
+            expert_outs = torch.bmm(expert_hidden, self.expert_w2.transpose(1, 2))
+            expert_outs = expert_outs + self.expert_b2.unsqueeze(1)
+            expert_outs = expert_outs.transpose(0, 1)
         out = (expert_outs * weights.unsqueeze(-1)).sum(dim=1).reshape(x.shape)
         return out, gate_logits
 
@@ -570,6 +625,9 @@ class DFINETransformer(nn.Module):
                  moe_num_experts=4,
                  moe_2layer_gate=False,
                  moe_use_gating_residuals=False,
+                 moe_top_k=None,
+                 use_deeper_ffn=False,
+                 deeper_ffn_hidden_dims=None,
                  ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -615,6 +673,9 @@ class DFINETransformer(nn.Module):
             moe_num_experts=moe_num_experts,
             moe_2layer_gate=moe_2layer_gate,
             moe_use_gating_residuals=moe_use_gating_residuals,
+            moe_top_k=moe_top_k,
+            use_deeper_ffn=use_deeper_ffn,
+            deeper_ffn_hidden_dims=deeper_ffn_hidden_dims,
         )
         decoder_layer_wide = TransformerDecoderLayer(
             hidden_dim,
@@ -630,6 +691,9 @@ class DFINETransformer(nn.Module):
             moe_num_experts=moe_num_experts,
             moe_2layer_gate=moe_2layer_gate,
             moe_use_gating_residuals=moe_use_gating_residuals,
+            moe_top_k=moe_top_k,
+            use_deeper_ffn=use_deeper_ffn,
+            deeper_ffn_hidden_dims=deeper_ffn_hidden_dims,
         )
         self.decoder = TransformerDecoder(hidden_dim, decoder_layer, decoder_layer_wide, num_layers, nhead,
                                           reg_max, self.reg_scale, self.up, eval_idx, layer_scale, act=activation)

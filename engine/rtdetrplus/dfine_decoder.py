@@ -162,6 +162,7 @@ class TransformerDecoderLayer(nn.Module):
                  moe_2layer_gate=False,
                  moe_use_gating_residuals=False,
                  moe_top_k=None,
+                 moe_routing='dynamic',
                  use_deeper_ffn=False,
                  deeper_ffn_hidden_dims=None):
         super(TransformerDecoderLayer, self).__init__()
@@ -205,6 +206,7 @@ class TransformerDecoderLayer(nn.Module):
                 moe_2layer_gate=moe_2layer_gate,
                 moe_use_gating_residuals=moe_use_gating_residuals,
                 moe_top_k=moe_top_k,
+                moe_routing=moe_routing,
             )
         elif self.use_deeper_ffn:
             deeper_ffn_hidden_dims = deeper_ffn_hidden_dims or [800, 800]
@@ -288,24 +290,36 @@ class MoE_FFN(nn.Module):
                  activation='silu',
                  moe_2layer_gate=False,
                  moe_use_gating_residuals=False,
-                 moe_top_k=None):
+                 moe_top_k=None,
+                 moe_routing='dynamic'):
         super().__init__()
         assert num_experts > 0, 'num_experts must be positive'
         self.num_experts = num_experts
+        if moe_routing not in ('dynamic', 'none'):
+            raise ValueError("moe_routing must be either 'dynamic' or 'none'")
+        self.moe_routing = moe_routing
         self.moe_use_gating_residuals = moe_use_gating_residuals
         self.moe_top_k = moe_top_k
         if self.moe_top_k is not None:
             self.moe_top_k = int(self.moe_top_k)
             if self.moe_top_k < 0:
                 raise ValueError('moe_top_k must be non-negative or None')
-        if moe_2layer_gate:
-            self.router = nn.Sequential(
-                nn.Linear(embed_dim, num_experts * 8, bias=False).float(),
-                nn.Tanh(),
-                nn.Linear(num_experts * 8, num_experts, bias=False).float(),
-            ).float()
+        if self.moe_routing == 'none':
+            if self.moe_top_k not in (None, 0):
+                raise ValueError("moe_top_k is only valid when moe_routing='dynamic'")
+            if moe_2layer_gate:
+                raise ValueError("moe_2layer_gate is only valid when moe_routing='dynamic'")
+            if self.moe_use_gating_residuals:
+                raise ValueError("moe_use_gating_residuals is only valid when moe_routing='dynamic'")
         else:
-            self.router = nn.Linear(embed_dim, num_experts, bias=False).float()
+            if moe_2layer_gate:
+                self.router = nn.Sequential(
+                    nn.Linear(embed_dim, num_experts * 8, bias=False).float(),
+                    nn.Tanh(),
+                    nn.Linear(num_experts * 8, num_experts, bias=False).float(),
+                ).float()
+            else:
+                self.router = nn.Linear(embed_dim, num_experts, bias=False).float()
         if self.moe_use_gating_residuals:
             self.gate_map = nn.Linear(num_experts, num_experts, bias=False)
         self.activation = get_activation(activation)
@@ -352,6 +366,16 @@ class MoE_FFN(nn.Module):
         # x: [B, N, C]
         d_model = x.shape[-1]
         reshaped_x = x.reshape(-1, d_model)
+        if self.moe_routing == 'none':
+            expert_inputs = reshaped_x.unsqueeze(0).expand(self.num_experts, -1, -1)
+            expert_hidden = torch.bmm(expert_inputs, self.expert_w1.transpose(1, 2))
+            expert_hidden = expert_hidden + self.expert_b1.unsqueeze(1)
+            expert_hidden = self.dropout(self.activation(expert_hidden))
+            expert_outs = torch.bmm(expert_hidden, self.expert_w2.transpose(1, 2))
+            expert_outs = expert_outs + self.expert_b2.unsqueeze(1)
+            out = expert_outs.mean(dim=0).reshape(x.shape)
+            return out, None
+
         if isinstance(self.router, nn.Linear):
             if self.router.weight.dtype != torch.float32:
                 self.router = self.router.float()
@@ -626,6 +650,7 @@ class DFINETransformer(nn.Module):
                  moe_2layer_gate=False,
                  moe_use_gating_residuals=False,
                  moe_top_k=None,
+                 moe_routing='dynamic',
                  use_deeper_ffn=False,
                  deeper_ffn_hidden_dims=None,
                  ):
@@ -674,6 +699,7 @@ class DFINETransformer(nn.Module):
             moe_2layer_gate=moe_2layer_gate,
             moe_use_gating_residuals=moe_use_gating_residuals,
             moe_top_k=moe_top_k,
+            moe_routing=moe_routing,
             use_deeper_ffn=use_deeper_ffn,
             deeper_ffn_hidden_dims=deeper_ffn_hidden_dims,
         )
@@ -692,6 +718,7 @@ class DFINETransformer(nn.Module):
             moe_2layer_gate=moe_2layer_gate,
             moe_use_gating_residuals=moe_use_gating_residuals,
             moe_top_k=moe_top_k,
+            moe_routing=moe_routing,
             use_deeper_ffn=use_deeper_ffn,
             deeper_ffn_hidden_dims=deeper_ffn_hidden_dims,
         )

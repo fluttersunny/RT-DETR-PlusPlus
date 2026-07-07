@@ -1,0 +1,10 @@
+__include__: [
+  './rtdetrplus_hgnetv2_l_coco.yml'
+]
+
+output_dir: ./outputs/rtdetrplus_hgnetv2_l_coco_ffn_l8_dinov3
+
+DFINETransformer:
+  num_layers: 8
+  use_moe_ffn: False
+  dim_feedforward: 1024

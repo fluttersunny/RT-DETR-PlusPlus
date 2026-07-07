@@ -49,30 +49,35 @@ def main(args, ):
             outputs = self.postprocessor(outputs, orig_target_sizes)
             return outputs
 
-    model = Model()
+    model = Model().eval()
 
-    data = torch.rand(32, 3, 640, 640)
+    data = torch.rand(1, 3, 640, 640)
     size = torch.tensor([[640, 640]])
-    _ = model(data, size)
+    with torch.no_grad():
+        _ = model(data, size)
 
     dynamic_axes = {
         'images': {0: 'N', },
-        'orig_target_sizes': {0: 'N'}
+        'orig_target_sizes': {0: 'N'},
+        'labels': {0: 'N'},
+        'boxes': {0: 'N'},
+        'scores': {0: 'N'},
     }
 
     output_file = args.resume.replace('.pth', '.onnx') if args.resume else 'model.onnx'
 
-    torch.onnx.export(
-        model,
-        (data, size),
-        output_file,
-        input_names=['images', 'orig_target_sizes'],
-        output_names=['labels', 'boxes', 'scores'],
-        dynamic_axes=dynamic_axes,
-        opset_version=16,
-        verbose=False,
-        do_constant_folding=True,
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            (data, size),
+            output_file,
+            input_names=['images', 'orig_target_sizes'],
+            output_names=['labels', 'boxes', 'scores'],
+            dynamic_axes=dynamic_axes,
+            opset_version=16,
+            verbose=False,
+            do_constant_folding=True,
+        )
 
     if args.check:
         import onnx

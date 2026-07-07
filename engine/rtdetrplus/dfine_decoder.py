@@ -314,35 +314,40 @@ class MoE_FFN(nn.Module):
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
+    def _router_forward(self, x: torch.Tensor):
+        x = x.float()
+        if isinstance(self.router, nn.Linear):
+            bias = self.router.bias.float() if self.router.bias is not None else None
+            return F.linear(x, self.router.weight.float(), bias)
+
+        first, act, second = self.router
+        first_bias = first.bias.float() if first.bias is not None else None
+        second_bias = second.bias.float() if second.bias is not None else None
+        x = F.linear(x, first.weight.float(), first_bias)
+        x = act(x)
+        return F.linear(x, second.weight.float(), second_bias)
+
     def forward(self, x: torch.Tensor, gate_residual: torch.Tensor=None):
         # x: [B, N, C]
         d_model = x.shape[-1]
         reshaped_x = x.reshape(-1, d_model)
-        if isinstance(self.router, nn.Linear):
-            if self.router.weight.dtype != torch.float32:
-                self.router = self.router.float()
-                setattr(self.router.weight, 'router', True)
-        else:
-            if self.router[0].weight.dtype != torch.float32:
-                self.router = self.router.float()
-                setattr(self.router[0].weight, 'router', True)
-                setattr(self.router[2].weight, 'router', True)
 
-        gate_logits = self.router(reshaped_x.float())
+        gate_logits = self._router_forward(reshaped_x)
         if self.moe_use_gating_residuals and gate_residual is not None and gate_residual.shape[-1] == self.num_experts:
+            gate_residual = gate_residual.reshape(-1, self.num_experts)
             gate_residual = self.gate_map(gate_residual.to(self.gate_map.weight.dtype))
             gate_logits += gate_residual
 
         weights = F.softmax(gate_logits, dim=-1)
         expert_inputs = reshaped_x.unsqueeze(0).expand(self.num_experts, -1, -1)
-        expert_hidden = torch.bmm(expert_inputs, self.expert_w1.transpose(1, 2))
+        expert_hidden = torch.matmul(expert_inputs, self.expert_w1.transpose(1, 2))
         expert_hidden = expert_hidden + self.expert_b1.unsqueeze(1)
         expert_hidden = self.dropout(self.activation(expert_hidden))
-        expert_outs = torch.bmm(expert_hidden, self.expert_w2.transpose(1, 2))
+        expert_outs = torch.matmul(expert_hidden, self.expert_w2.transpose(1, 2))
         expert_outs = expert_outs + self.expert_b2.unsqueeze(1)
         expert_outs = expert_outs.transpose(0, 1)
-        out = (expert_outs * weights.unsqueeze(-1)).sum(dim=1).reshape(x.shape)
-        return out, gate_logits
+        out = (expert_outs * weights.unsqueeze(-1)).sum(dim=1).reshape_as(x)
+        return out, gate_logits.reshape(x.size(0), x.size(1), self.num_experts)
 
 
 class Gate(nn.Module):
@@ -465,8 +470,7 @@ class TransformerDecoder(nn.Module):
         if self.layers and getattr(self.layers[0], 'use_moe_ffn', False):
             moe_ffn = getattr(self.layers[0], 'moe_ffn', None)
             if moe_ffn is not None and getattr(moe_ffn, 'moe_use_gating_residuals', False):
-                token_count = output.shape[0] * output.shape[1]
-                gate_residual = output.new_zeros(token_count, moe_ffn.num_experts)
+                gate_residual = output.new_zeros(output.size(0), output.size(1), moe_ffn.num_experts)
 
         dec_out_bboxes = []
         dec_out_logits = []
@@ -489,11 +493,6 @@ class TransformerDecoder(nn.Module):
                 value = self.value_op(memory, None, query_pos_embed.shape[-1], memory_mask, spatial_shapes)
                 output = F.interpolate(output, size=query_pos_embed.shape[-1])
                 output_detach = output.detach()
-
-            if gate_residual is not None:
-                expected_tokens = output.shape[0] * output.shape[1]
-                if gate_residual.shape[0] != expected_tokens:
-                    gate_residual = output.new_zeros(expected_tokens, gate_residual.shape[-1])
 
             output, gate_residual = layer(
                 output,
